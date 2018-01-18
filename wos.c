@@ -389,13 +389,90 @@ static int32_t do_queue_create(queue_create_param_t *param) {
   return qcb->id;
 }
 
+static void do_queue_tasks_pull(void) {
+  enter_critical();
+  for (int i = 0; i < MAX_QUEUES; i++) {
+    if (qcbs[i].state == QUEUE_STATE_FREE) {
+      continue;
+    }
+    if (qcbs[i].count == 0) {
+      continue;
+    }
+    task_control_block_t *pull_tcbs[MAX_TASKS] = {0};
+    int pull_task_count = 0;
+    for (int j = 0; j < MAX_TASKS; j++) {
+      if (tcbs[j].state != TASK_WAITING_TO_PULL) {
+        continue;
+      }
+      if (tcbs[j].trans_queue_id != qcbs[i].id) {
+        continue;
+      }
+      pull_task_count++;
+      pull_tcbs[j] = &tcbs[j];
+    }
+    while (qcbs[i].count > 0) {
+      if (pull_task_count == 0) {
+        break;
+      }
+      int highest_priority_task_i = MAX_TASKS;
+      for (int j = 0; j < MAX_TASKS; j++) {
+        if (pull_tcbs[j] == 0) {
+          continue;
+        }
+        if (pull_tcbs[j]->priority < highest_priority_task_i) {
+          highest_priority_task_i = j;
+        }
+      }
+      // pull
+      memmove(pull_tcbs[highest_priority_task_i]->trans_item, (void *)(qcbs[i].data_base - qcbs[i].item_size + 1), qcbs[i].item_size);
+      // adjust
+      memmove((void *)(qcbs[i].data_base - qcbs[i].item_size*(qcbs[i].count - 1) + 1), (void *)(qcbs[i].data_base - qcbs[i].item_size*qcbs[i].count + 1), qcbs[i].item_size*(qcbs[i].count - 1));
+      pull_tcbs[highest_priority_task_i]->ctx->int_ctx.r0 = 0;
+      pull_tcbs[highest_priority_task_i]->state = TASK_STATE_READY;
+
+      qcbs[i].count--;
+      pull_task_count--;
+      pull_tcbs[highest_priority_task_i] = 0;
+    }
+  }
+  leave_critical();
+}
+
+static void do_queue_tasks_push(void) {
+  enter_critical();
+  for (int i = 0; i < MAX_TASKS; i++) {
+    if (tcbs[i].state != TASK_WAITING_TO_PUSH) {
+      continue;
+    }
+    queue_control_block_t *qcb = &qcbs[tcbs[i].trans_queue_id];
+    if (qcb->state == QUEUE_STATE_FREE) {
+      continue;
+    }
+    if (qcb->count >= qcb->length) {
+      continue;
+    }
+    // push
+    memmove((void *)(qcb->data_base - qcb->item_size*(qcb->count+1) + 1), tcbs[i].trans_item, qcb->item_size);
+    qcb->count++;
+    tcbs[i].ctx->int_ctx.r0 = 0;
+    tcbs[i].state = TASK_STATE_READY;
+  }
+  leave_critical();
+}
+
 // queue push and pull are similar, and the process to really push/pull is in do_os_sche
 static int32_t do_queue_push(queue_trans_param_t *param) {
   enter_critical();
+  if (qcbs[param->queue_id].state == QUEUE_STATE_FREE) {
+    leave_critical();
+    return RET_QUEUE_TRANS_INVALID;
+  }
   current_tcb->state = TASK_WAITING_TO_PUSH;
   current_tcb->trans_queue_id = param->queue_id;
   current_tcb->trans_item = param->item;
   current_tcb->wait_timeout = param->timeout;
+  do_queue_tasks_push();
+  do_queue_tasks_pull();
   leave_critical();
   os_yield();
   return 0;
@@ -403,10 +480,16 @@ static int32_t do_queue_push(queue_trans_param_t *param) {
 
 static int32_t do_queue_pull(queue_trans_param_t *param) {
   enter_critical();
+  if (qcbs[param->queue_id].state == QUEUE_STATE_FREE) {
+    leave_critical();
+    return RET_QUEUE_TRANS_INVALID;
+  }
   current_tcb->state = TASK_WAITING_TO_PULL;
   current_tcb->trans_queue_id = param->queue_id;
   current_tcb->trans_item = param->item;
   current_tcb->wait_timeout = param->timeout;
+  do_queue_tasks_pull();
+  do_queue_tasks_push();
   leave_critical();
   os_yield();
   return 0;
@@ -415,7 +498,18 @@ static int32_t do_queue_pull(queue_trans_param_t *param) {
 static int32_t do_queue_close(uint16_t queue_id) {
   enter_critical();
   qcbs[queue_id].state = QUEUE_STATE_FREE;
+  for (int i = 0; i < MAX_TASKS; i++) {
+    if (tcbs[i].state != TASK_WAITING_TO_PUSH && tcbs[i].state != TASK_WAITING_TO_PULL) {
+      continue;
+    }
+    if (tcbs[i].trans_queue_id != queue_id) {
+      continue;
+    }
+    tcbs[i].ctx->int_ctx.r0 = RET_QUEUE_TRANS_INVALID;
+    tcbs[i].state = TASK_STATE_READY;
+  }
   leave_critical();
+  os_yield();
   return 0;
 }
 
@@ -490,83 +584,9 @@ static void do_os_sche(void) {
   enter_critical();
   // handling
   task_control_block_t *next_tcb = 0;
-  // handle queue pull
-  for (int i = 0; i < MAX_QUEUES; i++) {
-    if (qcbs[i].state == QUEUE_STATE_FREE) {
-      continue;
-    }
-    if (qcbs[i].count == 0) {
-      continue;
-    }
-    task_control_block_t *pull_tcbs[MAX_TASKS] = {0};
-    int pull_task_count = 0;
-    for (int j = 0; j < MAX_TASKS; j++) {
-      if (tcbs[j].state != TASK_WAITING_TO_PULL) {
-        continue;
-      }
-      if (tcbs[j].trans_queue_id != qcbs[i].id) {
-        continue;
-      }
-      pull_task_count++;
-      pull_tcbs[j] = &tcbs[j];
-    }
-    while (qcbs[i].count > 0) {
-      if (pull_task_count == 0) {
-        break;
-      }
-      int highest_priority_task_i = MAX_TASKS;
-      for (int j = 0; j < MAX_TASKS; j++) {
-        if (pull_tcbs[j] == 0) {
-          continue;
-        }
-        if (pull_tcbs[j]->priority < highest_priority_task_i) {
-          highest_priority_task_i = j;
-        }
-      }
-      // pull
-      memmove(pull_tcbs[highest_priority_task_i]->trans_item, (void *)(qcbs[i].data_base - qcbs[i].item_size + 1), qcbs[i].item_size);
-      // adjust
-      memmove((void *)(qcbs[i].data_base - qcbs[i].item_size*(qcbs[i].count - 1) + 1), (void *)(qcbs[i].data_base - qcbs[i].item_size*qcbs[i].count + 1), qcbs[i].item_size*(qcbs[i].count - 1));
-      pull_tcbs[highest_priority_task_i]->ctx->int_ctx.r0 = 0;
-      pull_tcbs[highest_priority_task_i]->state = TASK_STATE_READY;
-
-      qcbs[i].count--;
-      pull_task_count--;
-      pull_tcbs[highest_priority_task_i] = 0;
-    }
-  }
-
   // find highest priority ready; handle queue push; handle wait_timeout
   uint8_t highest_priority = 0xff;
   for (int i = 0; i < MAX_TASKS; i++) {
-    // handle queue push and pull free
-    if (tcbs[i].state == TASK_WAITING_TO_PUSH || tcbs[i].state == TASK_WAITING_TO_PULL) {
-      queue_control_block_t *qcb = 0;
-      for (int j = 0; j < MAX_QUEUES; j++) {
-        if (qcbs[j].state == QUEUE_STATE_FREE) {
-          continue;
-        }
-        if (qcbs[j].id == tcbs[i].trans_queue_id) {
-          qcb = &qcbs[j];
-          break;
-        }
-      }
-      if (qcb == 0) {
-        // not existing
-        tcbs[i].ctx->int_ctx.r0 = RET_QUEUE_TRANS_INVALID;
-        tcbs[i].state = TASK_STATE_READY;
-      } else {
-        if (tcbs[i].state == TASK_WAITING_TO_PUSH) {
-          if (qcb->count < qcb->length) {
-            // push
-            memmove((void *)(qcb->data_base - qcb->item_size*(qcb->count+1) + 1), tcbs[i].trans_item, qcb->item_size);
-            qcb->count++;
-            tcbs[i].ctx->int_ctx.r0 = 0;
-            tcbs[i].state = TASK_STATE_READY;
-          }
-        }
-      }
-    }
     // handle wait_timeout
     if (tcbs[i].wait_timeout == 0) {
       if (tcbs[i].state == TASK_STATE_SLEEPING) {
@@ -650,17 +670,8 @@ int32_t queue_push(uint16_t queue_id, void *item, uint32_t timeout) {
 
 int32_t queue_push_isr(uint16_t queue_id, void *item) {
   enter_critical();
-  queue_control_block_t *qcb = 0;
-  for (int j = 0; j < MAX_QUEUES; j++) {
-    if (qcbs[j].state == QUEUE_STATE_FREE) {
-      continue;
-    }
-    if (qcbs[j].id == queue_id) {
-      qcb = &qcbs[j];
-      break;
-    }
-  }
-  if (qcb == 0) {
+  queue_control_block_t *qcb = &qcbs[queue_id];
+  if (qcb->state == QUEUE_STATE_FREE) {
     leave_critical();
     return RET_QUEUE_TRANS_INVALID;
   }
@@ -670,7 +681,9 @@ int32_t queue_push_isr(uint16_t queue_id, void *item) {
   }
   memmove((void *)(qcb->data_base - qcb->item_size*(qcb->count+1) + 1), item, qcb->item_size);
   qcb->count++;
+  do_queue_tasks_pull();
   leave_critical();
+  os_yield();
   return 0;
 }
 
@@ -684,16 +697,8 @@ int32_t queue_pull(uint16_t queue_id, void *item, uint32_t timeout) {
 
 int32_t queue_pull_isr(uint16_t queue_id, void *item) {
   enter_critical();
-  queue_control_block_t *qcb = 0;
-  for (int j = 0; j < MAX_QUEUES; j++) {
-    if (qcbs[j].state == QUEUE_STATE_FREE) {
-      continue;
-    }
-    if (qcbs[j].id == queue_id) {
-      qcb = &qcbs[j];
-    }
-  }
-  if (qcb == 0) {
+  queue_control_block_t *qcb = &qcbs[queue_id];
+  if (qcb->state == QUEUE_STATE_FREE) {
     leave_critical();
     return RET_QUEUE_TRANS_INVALID;
   }
@@ -705,7 +710,9 @@ int32_t queue_pull_isr(uint16_t queue_id, void *item) {
   // adjust
   memmove((void *)(qcb->data_base - qcb->item_size*(qcb->count - 1) + 1), (void *)(qcb->data_base - qcb->item_size*qcb->count + 1), qcb->item_size*(qcb->count - 1));
   qcb->count--;
+  do_queue_tasks_push();
   leave_critical();
+  os_yield();
   return 0;
 }
 
