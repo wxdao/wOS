@@ -844,9 +844,6 @@ __attribute__((naked)) void PendSV_Handler(void) {
     R"(
     push {lr}
 
-    tst lr, #4
-    beq _ret
-
     mrs lr, psp
     stmdb lr!, {r4-r11}
     msr psp, lr
@@ -858,8 +855,6 @@ __attribute__((naked)) void PendSV_Handler(void) {
     msr psp, lr
 
     pop {pc}
-    _ret:
-    bx lr
     )"
   );
 }
