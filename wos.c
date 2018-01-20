@@ -207,7 +207,7 @@ static int32_t do_task_create(task_create_param_t *param) {
   enter_critical();
   // find memory for task stack
   // this algorithm is ugly...
-  uint32_t next_task_stack_base = (uint32_t)(tasks_stack_pool + sizeof(tasks_stack_pool)/8 - 1);
+  uint32_t next_task_stack_base = (uint32_t)(tasks_stack_pool + sizeof(tasks_stack_pool)/8) - 1;
   int found = 1;
   for (int i = -1; i < MAX_TASKS; i++) {
     if (i != -1 && tcbs[i].state == TASK_STATE_FREE) {
@@ -215,7 +215,7 @@ static int32_t do_task_create(task_create_param_t *param) {
     }
     uint32_t i_stack_base, i_stack_size;
     if (i == -1) {
-      i_stack_base = (uint32_t)(tasks_stack_pool + sizeof(tasks_stack_pool)/8 - 1);
+      i_stack_base = (uint32_t)(tasks_stack_pool + sizeof(tasks_stack_pool)/8) - 1;
       i_stack_size = 0;
     } else {
       i_stack_base = tcbs[i].stack_base;
@@ -316,7 +316,7 @@ static int32_t do_queue_create(queue_create_param_t *param) {
   enter_critical();
   // find memory for queue data
   // ugly algorithm. could have been better
-  uint32_t next_queue_data_base = (uint32_t)(queues_data_pool + sizeof(queues_data_pool) - 1);
+  uint32_t next_queue_data_base = (uint32_t)(queues_data_pool + sizeof(queues_data_pool)) - 1;
   int found = 1;
   for (int i = -1; i < MAX_QUEUES; i++) {
     if (i != -1 && qcbs[i].state == QUEUE_STATE_FREE) {
@@ -324,7 +324,7 @@ static int32_t do_queue_create(queue_create_param_t *param) {
     }
     uint32_t i_data_base, i_data_size;
     if (i == -1) {
-      i_data_base = (uint32_t)(queues_data_pool + sizeof(queues_data_pool) - 1);
+      i_data_base = (uint32_t)(queues_data_pool + sizeof(queues_data_pool)) - 1;
       i_data_size = 0;
     } else {
       i_data_base = qcbs[i].data_base;
