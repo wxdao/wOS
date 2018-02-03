@@ -1,7 +1,7 @@
 #ifndef __WOS_H
 #define __WOS_H
 
-#include <stdint.h>
+#include <stddef.h>
 
 // configs
 
@@ -35,35 +35,39 @@
 
 // types
 
+typedef int task_id_t;
+
+typedef int queue_id_t;
+
 typedef void (*task_func_t)(void *);
 
 // methods
 
-int32_t os_start(void);
+int os_start(void);
 
-int32_t task_create(task_func_t entry, void *arg, uint32_t stack_size,
-                    uint8_t priority);
-int32_t task_create_isr(task_func_t entry, void *arg, uint32_t stack_size,
-                        uint8_t priority);
+task_id_t task_create(task_func_t entry, void *arg, size_t stack_size,
+                      int priority);
+task_id_t task_create_isr(task_func_t entry, void *arg, size_t stack_size,
+                          int priority);
 
-void task_sleep(uint32_t ms);
+void task_sleep(unsigned int ticks);
 
 void task_exit(void);
 
-void task_kill(uint16_t task_id);
-void task_kill_isr(uint16_t);
+void task_kill(task_id_t task_id);
+void task_kill_isr(task_id_t task_id);
 
-int32_t queue_create(uint32_t item_size, uint32_t length);
-int32_t queue_create_isr(uint32_t item_size, uint32_t length);
+queue_id_t queue_create(size_t item_size, size_t length);
+queue_id_t queue_create_isr(size_t item_size, size_t length);
 
-int32_t queue_push(uint16_t queue_id, void *item, uint32_t timeout);
-int32_t queue_push_isr(uint16_t queue_id, void *item);
+int queue_push(queue_id_t queue_id, void *item, unsigned int timeout);
+int queue_push_isr(queue_id_t queue_id, void *item);
 
-int32_t queue_pull(uint16_t queue_id, void *item, uint32_t timeout);
-int32_t queue_pull_isr(uint16_t queue_id, void *item);
+int queue_pull(queue_id_t queue_id, void *item, unsigned int timeout);
+int queue_pull_isr(queue_id_t queue_id, void *item);
 
-void queue_close(uint16_t queue_id);
-void queue_close_isr(uint16_t queue_id);
+void queue_close(queue_id_t queue_id);
+void queue_close_isr(queue_id_t queue_id);
 
 void enter_critical(void);
 void leave_critical(void);

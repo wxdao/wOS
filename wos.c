@@ -1,5 +1,7 @@
 #include "wos.h"
 
+#include <stdint.h>
+
 #include "stm32f10x.h"
 
 #define SYSCALL_OS_START 0
@@ -25,50 +27,49 @@
 // contexts defs
 
 typedef struct {
-  uint32_t r0;
-  uint32_t r1;
-  uint32_t r2;
-  uint32_t r3;
-  uint32_t r12;
+  int32_t r0;
+  int32_t r1;
+  int32_t r2;
+  int32_t r3;
+  int32_t r12;
   uint32_t lr;
   uint32_t pc;
   uint32_t xpsr;
 } interrupt_context_t;
 
 typedef struct {
-  uint32_t r4;
-  uint32_t r5;
-  uint32_t r6;
-  uint32_t r7;
-  uint32_t r8;
-  uint32_t r9;
-  uint32_t r10;
-  uint32_t r11;
+  int32_t r4;
+  int32_t r5;
+  int32_t r6;
+  int32_t r7;
+  int32_t r8;
+  int32_t r9;
+  int32_t r10;
+  int32_t r11;
   interrupt_context_t int_ctx;
 } task_context_t;
 
 // control blocks defs
 
 typedef struct {
-  uint16_t id;
-  uint8_t state;
-  uint8_t priority;
-  uint16_t trans_queue_id;
+  task_id_t id;
+  int state;
+  int priority;
+  queue_id_t trans_queue_id;
   void *trans_item;
-  uint32_t wait_timeout;
+  unsigned int wait_timeout;
   uint32_t stack_base;
-  uint32_t stack_size;
+  size_t stack_size;
   task_context_t *ctx;
 } task_control_block_t;
 
 typedef struct {
-  uint16_t id;
-  uint8_t state;
-  uint8_t ctl;
-  uint32_t count;
+  queue_id_t id;
+  int state;
+  size_t count;
   uint32_t data_base;
-  uint32_t item_size;
-  uint32_t length;
+  size_t item_size;
+  size_t length;
 } queue_control_block_t;
 
 // params defs
@@ -76,26 +77,26 @@ typedef struct {
 typedef struct {
   task_func_t entry;
   void *arg;
-  uint32_t stack_size;
-  uint8_t priority;
+  size_t stack_size;
+  int priority;
 } task_create_param_t;
 
 typedef struct {
-  uint32_t item_size;
-  uint32_t length;
+  size_t item_size;
+  size_t length;
 } queue_create_param_t;
 
 typedef struct {
-  uint16_t queue_id;
+  queue_id_t queue_id;
   void *item;
-  uint32_t timeout;
+  unsigned int timeout;
 } queue_trans_param_t;
 
 // os vars
 
 static int os_started = 0;
 
-static uint32_t os_ticks = 0;
+static unsigned int os_ticks = 0;
 
 // task vars
 
@@ -114,7 +115,7 @@ static queue_control_block_t qcbs[MAX_QUEUES] = {0};
 // static methods
 
 // implement these here so it doesn't rely on C library
-static void *memset(void *s, int c, uint32_t n) {
+static void *memset(void *s, int c, size_t n) {
   const unsigned char uc = c;
   unsigned char *su;
   for (su = s; 0 < n; ++su, --n)
@@ -122,7 +123,7 @@ static void *memset(void *s, int c, uint32_t n) {
   return s;
 }
 
-static void *memmove(void *dst, const void *src, uint32_t count) {
+static void *memmove(void *dst, const void *src, size_t count) {
   char *tmpdst = (char *)dst;
   char *tmpsrc = (char *)src;
   if (tmpdst <= tmpsrc || tmpdst >= tmpsrc + count) {
@@ -147,9 +148,8 @@ static inline void set_pendsv(void) { SCB->ICSR = SCB_ICSR_PENDSVSET; }
 static void os_yield(void) { set_pendsv(); }
 
 // 'syscall' wrapper
-static inline uint32_t syscall(uint32_t r0, uint32_t r1, uint32_t r2,
-                               uint32_t r3) {
-  uint32_t ret;
+static inline int32_t syscall(int32_t r0, int32_t r1, int32_t r2, int32_t r3) {
+  int32_t ret;
   __asm__ volatile("mov r0, %1 \n\t"
                    "mov r1, %2 \n\t"
                    "mov r2, %3 \n\t"
@@ -193,7 +193,7 @@ static void _task_suspending(void *arg) {
 
 // do methods, which are invoked by handlers only
 
-static int32_t do_task_create(task_create_param_t *param) {
+static task_id_t do_task_create(task_create_param_t *param) {
   if (param->stack_size % 8 != 0) {
     return RET_TASK_CREATE_NOT_ALIGNED;
   }
@@ -257,11 +257,11 @@ static int32_t do_task_create(task_create_param_t *param) {
   task_ctx->int_ctx.xpsr = 0x01000000;
   task_ctx->int_ctx.pc = (uint32_t)(uint32_t *)param->entry | 1;
   task_ctx->int_ctx.lr = (uint32_t)(uint32_t *)task_exit | 1;
-  task_ctx->int_ctx.r0 = (uint32_t)(uint32_t *)param->arg;
+  task_ctx->int_ctx.r0 = (int32_t)(int32_t *)param->arg;
 
   // build tcb
   task_control_block_t *tcb = 0;
-  uint16_t task_id = 0;
+  task_id_t task_id = 0;
   for (; task_id < MAX_TASKS; task_id++) {
     if (tcbs[task_id].state == TASK_STATE_FREE) {
       tcb = &tcbs[task_id];
@@ -284,7 +284,7 @@ static int32_t do_task_create(task_create_param_t *param) {
 }
 
 // these are simply setting current task's state
-static int32_t do_task_sleep(uint32_t timeout) {
+static int do_task_sleep(unsigned int timeout) {
   enter_critical();
   current_tcb->wait_timeout = timeout;
   current_tcb->state = TASK_STATE_SLEEPING;
@@ -293,7 +293,7 @@ static int32_t do_task_sleep(uint32_t timeout) {
   return 0;
 }
 
-static int32_t do_task_exit(void) {
+static int do_task_exit(void) {
   enter_critical();
   current_tcb->state = TASK_STATE_FREE;
   leave_critical();
@@ -301,7 +301,7 @@ static int32_t do_task_exit(void) {
   return 0;
 }
 
-static int32_t do_task_kill(uint16_t task_id) {
+static int do_task_kill(task_id_t task_id) {
   enter_critical();
   tcbs[task_id].state = TASK_STATE_FREE;
   leave_critical();
@@ -309,7 +309,7 @@ static int32_t do_task_kill(uint16_t task_id) {
   return 0;
 }
 
-static int32_t do_queue_create(queue_create_param_t *param) {
+static queue_id_t do_queue_create(queue_create_param_t *param) {
   enter_critical();
   // find memory for queue data
   // ugly algorithm. could have been better
@@ -365,7 +365,7 @@ static int32_t do_queue_create(queue_create_param_t *param) {
 
   // build qcb
   queue_control_block_t *qcb = 0;
-  uint16_t queue_id = 0;
+  queue_id_t queue_id = 0;
   for (; queue_id < MAX_QUEUES; queue_id++) {
     if (qcbs[queue_id].state == QUEUE_STATE_FREE) {
       qcb = &qcbs[queue_id];
@@ -378,7 +378,6 @@ static int32_t do_queue_create(queue_create_param_t *param) {
   }
 
   qcb->id = queue_id;
-  qcb->ctl = 0;
   qcb->state = QUEUE_STATE_NORMAL;
   qcb->data_base = next_queue_data_base;
   qcb->item_size = param->item_size;
@@ -469,7 +468,7 @@ static void do_queue_tasks_push(void) {
 
 // queue push and pull are similar, and the process to really push/pull is in
 // do_os_sche
-static int32_t do_queue_push(queue_trans_param_t *param) {
+static int do_queue_push(queue_trans_param_t *param) {
   enter_critical();
   if (qcbs[param->queue_id].state == QUEUE_STATE_FREE) {
     leave_critical();
@@ -486,7 +485,7 @@ static int32_t do_queue_push(queue_trans_param_t *param) {
   return 0;
 }
 
-static int32_t do_queue_pull(queue_trans_param_t *param) {
+static int do_queue_pull(queue_trans_param_t *param) {
   enter_critical();
   if (qcbs[param->queue_id].state == QUEUE_STATE_FREE) {
     leave_critical();
@@ -503,7 +502,7 @@ static int32_t do_queue_pull(queue_trans_param_t *param) {
   return 0;
 }
 
-static int32_t do_queue_close(uint16_t queue_id) {
+static int do_queue_close(queue_id_t queue_id) {
   enter_critical();
   qcbs[queue_id].state = QUEUE_STATE_FREE;
   for (int i = 0; i < MAX_TASKS; i++) {
@@ -522,7 +521,7 @@ static int32_t do_queue_close(uint16_t queue_id) {
   return 0;
 }
 
-static int32_t do_os_start(void) {
+static int do_os_start(void) {
   if (os_started) {
     return RET_OS_START_ALREADY_STARTED;
   }
@@ -650,14 +649,14 @@ static void do_os_sche(void) {
 
 // queue methods (public methods)
 
-int32_t queue_create(uint32_t item_size, uint32_t length) {
+int queue_create(size_t item_size, size_t length) {
   volatile queue_create_param_t param;
   param.item_size = item_size;
   param.length = length;
   return syscall(SYSCALL_QUEUE_CREATE, (int)&param, 0, 0);
 }
 
-int32_t queue_push(uint16_t queue_id, void *item, uint32_t timeout) {
+int queue_push(queue_id_t queue_id, void *item, unsigned int timeout) {
   volatile queue_trans_param_t param;
   param.queue_id = queue_id;
   param.item = item;
@@ -665,7 +664,7 @@ int32_t queue_push(uint16_t queue_id, void *item, uint32_t timeout) {
   return syscall(SYSCALL_QUEUE_PUSH, (int)&param, 0, 0);
 }
 
-int32_t queue_push_isr(uint16_t queue_id, void *item) {
+int queue_push_isr(queue_id_t queue_id, void *item) {
   enter_critical();
   queue_control_block_t *qcb = &qcbs[queue_id];
   if (qcb->state == QUEUE_STATE_FREE) {
@@ -685,7 +684,7 @@ int32_t queue_push_isr(uint16_t queue_id, void *item) {
   return 0;
 }
 
-int32_t queue_pull(uint16_t queue_id, void *item, uint32_t timeout) {
+int queue_pull(queue_id_t queue_id, void *item, unsigned int timeout) {
   volatile queue_trans_param_t param;
   param.queue_id = queue_id;
   param.item = item;
@@ -693,7 +692,7 @@ int32_t queue_pull(uint16_t queue_id, void *item, uint32_t timeout) {
   return syscall(SYSCALL_QUEUE_PULL, (int)&param, 0, 0);
 }
 
-int32_t queue_pull_isr(uint16_t queue_id, void *item) {
+int queue_pull_isr(queue_id_t queue_id, void *item) {
   enter_critical();
   queue_control_block_t *qcb = &qcbs[queue_id];
   if (qcb->state == QUEUE_STATE_FREE) {
@@ -716,22 +715,22 @@ int32_t queue_pull_isr(uint16_t queue_id, void *item) {
   return 0;
 }
 
-void queue_close(uint16_t queue_id) {
+void queue_close(queue_id_t queue_id) {
   syscall(SYSCALL_QUEUE_CLOSE, queue_id, 0, 0);
 }
 
-void queue_close_isr(uint16_t queue_id) { do_queue_close(queue_id); }
+void queue_close_isr(queue_id_t queue_id) { do_queue_close(queue_id); }
 
 // task methods (public methods)
 
 void task_exit(void) { syscall(SYSCALL_TASK_EXIT, 0, 0, 0); }
 
-void task_kill(uint16_t task_id) { syscall(SYSCALL_TASK_KILL, task_id, 0, 0); }
+void task_kill(task_id_t task_id) { syscall(SYSCALL_TASK_KILL, task_id, 0, 0); }
 
-void task_sleep(uint32_t ms) { syscall(SYSCALL_TASK_SLEEP, ms, 0, 0); }
+void task_sleep(unsigned int ms) { syscall(SYSCALL_TASK_SLEEP, ms, 0, 0); }
 
-int32_t task_create(task_func_t entry, void *arg, uint32_t stack_size,
-                    uint8_t priority) {
+task_id_t task_create(task_func_t entry, void *arg, size_t stack_size,
+                      int priority) {
   volatile task_create_param_t param;
   param.entry = entry;
   param.arg = arg;
@@ -740,8 +739,8 @@ int32_t task_create(task_func_t entry, void *arg, uint32_t stack_size,
   return syscall(SYSCALL_TASK_CREATE, (int)&param, 0, 0);
 }
 
-int32_t task_create_isr(task_func_t entry, void *arg, uint32_t stack_size,
-                        uint8_t priority) {
+task_id_t task_create_isr(task_func_t entry, void *arg, size_t stack_size,
+                          int priority) {
   task_create_param_t param;
   param.entry = entry;
   param.arg = arg;
@@ -752,7 +751,7 @@ int32_t task_create_isr(task_func_t entry, void *arg, uint32_t stack_size,
 
 // os methods (public methods)
 
-int32_t os_start(void) { return syscall(SYSCALL_OS_START, 0, 0, 0); }
+int os_start(void) { return syscall(SYSCALL_OS_START, 0, 0, 0); }
 
 // handlers
 
