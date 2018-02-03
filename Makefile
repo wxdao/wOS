@@ -1,5 +1,5 @@
 # Put all the source files here
-SRCS = main.c wos.c
+SRCS = main.c wos.c heap.c
 
 # Binary will be generated with this name (.elf, etc)
 PROJ_NAME = hello_world

@@ -5,10 +5,10 @@
 
 // configs
 
-#define TASKS_STACK_POOL_SIZE 0x2000
+#define HEAP_SIZE 0x2000
+
 #define MAX_TASKS 10
 
-#define QUEUES_DATA_POOL_SIZE 0x400
 #define MAX_QUEUES 5
 
 // defs
@@ -16,6 +16,8 @@
 #define NO_TIMEOUT 0xffffffff
 
 // return codes
+
+#define RET_OS_INIT_HEAP_FAILED -1
 
 #define RET_OS_START_ALREADY_STARTED -1
 #define RET_OS_START_NO_TASK -2
@@ -42,6 +44,8 @@ typedef int queue_id_t;
 typedef void (*task_func_t)(void *);
 
 // methods
+
+int os_init(void);
 
 int os_start(void);
 
@@ -71,5 +75,7 @@ void queue_close_isr(queue_id_t queue_id);
 
 void enter_critical(void);
 void leave_critical(void);
+
+
 
 #endif

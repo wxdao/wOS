@@ -1,5 +1,7 @@
 #include "wos.h"
 
+#include "heap.h"
+
 #include <stdint.h>
 
 #include "stm32f10x.h"
@@ -58,7 +60,7 @@ typedef struct {
   queue_id_t trans_queue_id;
   void *trans_item;
   unsigned int wait_timeout;
-  uint32_t stack_base;
+  void *stack_base;
   size_t stack_size;
   task_context_t *ctx;
 } task_control_block_t;
@@ -67,7 +69,8 @@ typedef struct {
   queue_id_t id;
   int state;
   size_t count;
-  uint32_t data_base;
+  size_t head_pos;
+  void *data_base;
   size_t item_size;
   size_t length;
 } queue_control_block_t;
@@ -98,9 +101,11 @@ static int os_started = 0;
 
 static unsigned int os_ticks = 0;
 
-// task vars
+static uint8_t heap_pool[HEAP_SIZE] = {0};
 
-static uint64_t tasks_stack_pool[TASKS_STACK_POOL_SIZE / 8] = {0};
+heap_t *heap;
+
+// task vars
 
 static task_control_block_t tcbs[MAX_TASKS] = {0};
 
@@ -108,11 +113,13 @@ static task_control_block_t *current_tcb = 0;
 
 // queue vars
 
-static uint8_t queues_data_pool[QUEUES_DATA_POOL_SIZE] = {0};
-
 static queue_control_block_t qcbs[MAX_QUEUES] = {0};
 
 // static methods
+
+static void *align_stack_ptr_low(void *ptr) {
+  return (void *)(8 * (((uintptr_t)ptr) / 8));
+}
 
 // implement these here so it doesn't rely on C library
 static void *memset(void *s, int c, size_t n) {
@@ -198,61 +205,15 @@ static task_id_t do_task_create(task_create_param_t *param) {
     return RET_TASK_CREATE_NOT_ALIGNED;
   }
   enter_critical();
-  // find memory for task stack
-  // this algorithm is ugly...
-  uint32_t next_task_stack_base =
-      (uint32_t)(tasks_stack_pool + sizeof(tasks_stack_pool) / 8) - 1;
-  int found = 1;
-  for (int i = -1; i < MAX_TASKS; i++) {
-    if (i != -1 && tcbs[i].state == TASK_STATE_FREE) {
-      continue;
-    }
-    uint32_t i_stack_base, i_stack_size;
-    if (i == -1) {
-      i_stack_base =
-          (uint32_t)(tasks_stack_pool + sizeof(tasks_stack_pool) / 8) - 1;
-      i_stack_size = 0;
-    } else {
-      i_stack_base = tcbs[i].stack_base;
-      i_stack_size = tcbs[i].stack_size;
-    }
-    uint32_t highest_stack_base = 0;
-    for (int j = 0; j <= MAX_TASKS; j++) {
-      if (j != MAX_TASKS && tcbs[j].state == TASK_STATE_FREE) {
-        continue;
-      }
-      if (j == i) {
-        continue;
-      }
-      uint32_t j_stack_base;
-      if (j == MAX_TASKS) {
-        j_stack_base = (uint32_t)tasks_stack_pool;
-      } else {
-        j_stack_base = tcbs[j].stack_base;
-      }
-      if (j_stack_base > i_stack_base) {
-        continue;
-      }
-      if (j_stack_base > highest_stack_base) {
-        highest_stack_base = j_stack_base;
-      }
-    }
-    if (highest_stack_base != 0 &&
-        highest_stack_base <= i_stack_base - i_stack_size - param->stack_size) {
-      next_task_stack_base = i_stack_base - i_stack_size;
-      found = 1;
-      break;
-    }
-    found = 0;
-  }
-  if (!found) {
+  void *stack_base = heap_alloc(heap, param->stack_size);
+  if (stack_base == NULL) {
     leave_critical();
     return RET_TASK_CREATE_INSUFFICIENT_STACK_SPACE;
   }
 
   // build context
-  task_context_t *task_ctx =
-      (task_context_t *)(next_task_stack_base - sizeof(task_context_t) + 1);
+  task_context_t *task_ctx = (task_context_t *)align_stack_ptr_low(
+      ((char *)stack_base) + param->stack_size - sizeof(task_context_t));
   memset(task_ctx, 0, sizeof(task_context_t));
   task_ctx->int_ctx.xpsr = 0x01000000;
   task_ctx->int_ctx.pc = (uint32_t)(uint32_t *)param->entry | 1;
@@ -276,7 +237,7 @@ static task_id_t do_task_create(task_create_param_t *param) {
   tcb->priority = param->priority;
   tcb->ctx = task_ctx;
   tcb->state = TASK_STATE_READY;
-  tcb->stack_base = next_task_stack_base;
+  tcb->stack_base = stack_base;
   tcb->stack_size = param->stack_size;
 
   leave_critical();
@@ -296,6 +257,7 @@ static int do_task_sleep(unsigned int timeout) {
 static int do_task_exit(void) {
   enter_critical();
   current_tcb->state = TASK_STATE_FREE;
+  heap_free(heap, current_tcb->stack_base);
   leave_critical();
   os_yield();
   return 0;
@@ -304,6 +266,7 @@ static int do_task_exit(void) {
 static int do_task_kill(task_id_t task_id) {
   enter_critical();
   tcbs[task_id].state = TASK_STATE_FREE;
+  heap_free(heap, tcbs[task_id].stack_base);
   leave_critical();
   os_yield();
   return 0;
@@ -311,54 +274,9 @@ static int do_task_kill(task_id_t task_id) {
 
 static queue_id_t do_queue_create(queue_create_param_t *param) {
   enter_critical();
-  // find memory for queue data
-  // ugly algorithm. could have been better
-  uint32_t next_queue_data_base =
-      (uint32_t)(queues_data_pool + sizeof(queues_data_pool)) - 1;
-  int found = 1;
-  for (int i = -1; i < MAX_QUEUES; i++) {
-    if (i != -1 && qcbs[i].state == QUEUE_STATE_FREE) {
-      continue;
-    }
-    uint32_t i_data_base, i_data_size;
-    if (i == -1) {
-      i_data_base = (uint32_t)(queues_data_pool + sizeof(queues_data_pool)) - 1;
-      i_data_size = 0;
-    } else {
-      i_data_base = qcbs[i].data_base;
-      i_data_size = qcbs[i].length * qcbs[i].item_size;
-    }
-    uint32_t highest_data_base = 0;
-    for (int j = 0; j <= MAX_QUEUES; j++) {
-      if (j != MAX_QUEUES && qcbs[j].state == QUEUE_STATE_FREE) {
-        continue;
-      }
-      if (j == i) {
-        continue;
-      }
-      uint32_t j_data_base;
-      if (j == MAX_QUEUES) {
-        j_data_base = (uint32_t)queues_data_pool;
-      } else {
-        j_data_base = qcbs[j].data_base;
-      }
-      if (j_data_base > i_data_base) {
-        continue;
-      }
-      if (j_data_base > highest_data_base) {
-        highest_data_base = j_data_base;
-      }
-    }
-    if (highest_data_base != 0 &&
-        highest_data_base <=
-            i_data_base - i_data_size - param->item_size * param->length) {
-      next_queue_data_base = i_data_base - i_data_size;
-      found = 1;
-      break;
-    }
-    found = 0;
-  }
-  if (!found) {
+
+  void *data_base = heap_alloc(heap, param->item_size * param->length);
+  if (data_base == NULL) {
     leave_critical();
     return RET_QUEUE_CREATE_INSUFFICIENT_DATA_SPACE;
   }
@@ -379,7 +297,7 @@ static queue_id_t do_queue_create(queue_create_param_t *param) {
 
   qcb->id = queue_id;
   qcb->state = QUEUE_STATE_NORMAL;
-  qcb->data_base = next_queue_data_base;
+  qcb->data_base = data_base;
   qcb->item_size = param->item_size;
   qcb->length = param->length;
   qcb->count = 0;
@@ -424,14 +342,10 @@ static void do_queue_tasks_pull(void) {
       }
       // pull
       memmove(pull_tcbs[highest_priority_task_i]->trans_item,
-              (void *)(qcbs[i].data_base - qcbs[i].item_size + 1),
+              (char *)qcbs[i].data_base + qcbs[i].head_pos * qcbs[i].item_size,
               qcbs[i].item_size);
       // adjust
-      memmove(
-          (void *)(qcbs[i].data_base - qcbs[i].item_size * (qcbs[i].count - 1) +
-                   1),
-          (void *)(qcbs[i].data_base - qcbs[i].item_size * qcbs[i].count + 1),
-          qcbs[i].item_size * (qcbs[i].count - 1));
+      qcbs[i].head_pos = (qcbs[i].head_pos + 1) % qcbs[i].length;
       pull_tcbs[highest_priority_task_i]->ctx->int_ctx.r0 = 0;
       pull_tcbs[highest_priority_task_i]->state = TASK_STATE_READY;
 
@@ -457,8 +371,11 @@ static void do_queue_tasks_push(void) {
       continue;
     }
     // push
-    memmove((void *)(qcb->data_base - qcb->item_size * (qcb->count + 1) + 1),
-            tcbs[i].trans_item, qcb->item_size);
+    memmove(
+        (void *)(qcb->data_base +
+                 qcb->item_size * ((qcb->count + qcb->head_pos) % qcb->length)),
+        tcbs[i].trans_item, qcb->item_size);
+
     qcb->count++;
     tcbs[i].ctx->int_ctx.r0 = 0;
     tcbs[i].state = TASK_STATE_READY;
@@ -505,6 +422,7 @@ static int do_queue_pull(queue_trans_param_t *param) {
 static int do_queue_close(queue_id_t queue_id) {
   enter_critical();
   qcbs[queue_id].state = QUEUE_STATE_FREE;
+  heap_free(heap, qcbs[queue_id].data_base);
   for (int i = 0; i < MAX_TASKS; i++) {
     if (tcbs[i].state != TASK_WAITING_TO_PUSH &&
         tcbs[i].state != TASK_WAITING_TO_PULL) {
@@ -675,8 +593,10 @@ int queue_push_isr(queue_id_t queue_id, void *item) {
     leave_critical();
     return RET_QUEUE_TRANS_FULL;
   }
-  memmove((void *)(qcb->data_base - qcb->item_size * (qcb->count + 1) + 1),
-          item, qcb->item_size);
+  memmove(
+      (void *)(qcb->data_base +
+               qcb->item_size * ((qcb->count + qcb->head_pos) % qcb->length)),
+      item, qcb->item_size);
   qcb->count++;
   do_queue_tasks_pull();
   leave_critical();
@@ -703,11 +623,12 @@ int queue_pull_isr(queue_id_t queue_id, void *item) {
     leave_critical();
     return RET_QUEUE_TRANS_EMPTY;
   }
-  memmove(item, (void *)(qcb->data_base - qcb->item_size + 1), qcb->item_size);
+
+  // pull
+  memmove(item, (char *)qcb->data_base + qcb->head_pos * qcb->item_size,
+          qcb->item_size);
   // adjust
-  memmove((void *)(qcb->data_base - qcb->item_size * (qcb->count - 1) + 1),
-          (void *)(qcb->data_base - qcb->item_size * qcb->count + 1),
-          qcb->item_size * (qcb->count - 1));
+  qcb->head_pos = (qcb->head_pos + 1) % qcb->length;
   qcb->count--;
   do_queue_tasks_push();
   leave_critical();
@@ -750,6 +671,13 @@ task_id_t task_create_isr(task_func_t entry, void *arg, size_t stack_size,
 }
 
 // os methods (public methods)
+
+int os_init() {
+  if ((heap = heap_init(heap_pool, sizeof(heap_pool))) == NULL) {
+    return RET_OS_INIT_HEAP_FAILED;
+  }
+  return 0;
+}
 
 int os_start(void) { return syscall(SYSCALL_OS_START, 0, 0, 0); }
 
