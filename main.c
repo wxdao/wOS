@@ -13,10 +13,11 @@ void init() {
 
   NVIC_SetPriority(SVCall_IRQn, NVIC_EncodePriority(0, 1, 0));
   NVIC_SetPriority(PendSV_IRQn, NVIC_EncodePriority(0, 1, 0));
+
+  os_init();
 }
 
-static uint16_t q1;
-static uint16_t q2;
+static queue_id_t q1;
 
 void task_ping(void *arg) {
   int id = (int)arg;
@@ -39,11 +40,10 @@ int main() {
   init();
 
   printf("create task_ping(50): id = %d\n", task_create(task_ping, (void *)50, 0x400, 0));
-  printf("create task_ping(100): id = %d\n", task_create(task_ping, (void *)100, 0x400, 0));
+  printf("create task_ping(100): id = %d\n", task_create(task_ping, (void *)200, 0x400, 0));
   printf("create task_echo(): id = %d\n", task_create(task_echo, (void *)0, 0x400, 0));
 
   printf("create queue: id = %d\n", q1 = queue_create(0x4, 1));
-  printf("create queue: id = %d\n", q2 = queue_create(0x4, 2));
 
   os_start();
 
