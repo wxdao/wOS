@@ -155,18 +155,17 @@ static inline void set_pendsv(void) { SCB->ICSR = SCB_ICSR_PENDSVSET; }
 static void os_yield(void) { set_pendsv(); }
 
 // 'syscall' wrapper
-static inline int32_t syscall(int32_t r0, int32_t r1, int32_t r2, int32_t r3) {
-  int32_t ret;
-  __asm__ volatile("mov r0, %1 \n\t"
-                   "mov r1, %2 \n\t"
-                   "mov r2, %3 \n\t"
-                   "mov r3, %4 \n\t"
-                   "svc #0x80  \n\t"
+static int32_t syscall(int32_t _r0, int32_t _r1, int32_t _r2, int32_t _r3) {
+  register int32_t r0 asm("r0") = _r0;
+  register int32_t r1 asm("r1") = _r1;
+  register int32_t r2 asm("r2") = _r2;
+  register int32_t r3 asm("r3") = _r3;
+  __asm__ volatile("svc #0x80  \n\t"
                    "mov %0, r0 \n\t"
-                   : "=r"(ret)
-                   : "r"(r0), "r"(r1), "r"(r2), "r"(r3)
-                   : "r0", "r1", "r2", "r3");
-  return ret;
+                   : "=r"(r0)
+                   : "r"(r1), "r"(r2), "r"(r3)
+                   :);
+  return r0;
 }
 
 // critical region methods
