@@ -80,12 +80,12 @@ void heap_free(heap_t *heap, void *ptr) {
   heap_free_info_t **found_info;
   for (found_info = &heap->free_head; (*found_info)->next != NULL;
        found_info = &(*found_info)->next) {
-    if (*found_info < ptr && (*found_info)->next >= ptr) {
+    if (*found_info < (heap_free_info_t *)ptr && (*found_info)->next >= (heap_free_info_t *)ptr) {
       break;
     }
   }
   // insert
-  if (*found_info >= ptr) {
+  if (*found_info >= (heap_free_info_t *)ptr) {
     to_free_info->next = *found_info;
     *found_info = to_free_info;
   } else {
